@@ -19,8 +19,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-# This list is the permission policy. Add a tool here only after reviewing its
-# implementation and deciding that the assistant may use it without side effects.
 _ALLOWED_TOOL_NAMES = frozenset({
     "list_home_directory",
     "system_status",
@@ -30,11 +28,11 @@ _ALLOWED_TOOL_NAMES = frozenset({
 
 
 def _make_embeddings():
-    """Build a local LangChain Embeddings implementation without network calls."""
+    """Build local LangChain embeddings without network calls."""
     from langchain_core.embeddings import Embeddings
 
     class LocalHashEmbeddings(Embeddings):
-        """Deterministic lexical embeddings; useful for local history retrieval."""
+        """Deterministic lexical embeddings for local history retrieval."""
 
         dimensions = 384
 
@@ -91,12 +89,12 @@ class AgentOrchestrator:
                 description="Search locally stored conversation history for relevant context.",
             ),
             StructuredTool.from_function(
-                func=self._get_local_device_inventory,
+                func=self.get_local_device_inventory,
                 name="get_local_device_inventory",
                 description=(
-                    "Read the user's manually maintained local device inventory from "
-                    "the Mark-LVI API at 127.0.0.1:8765. This only reads JSON already "
-                    "provided by the user; it does not scan or contact network devices."
+                    "Read the manually maintained device inventory from Mark-LVI's "
+                    "localhost API at 127.0.0.1:8765/devices. This only reads JSON "
+                    "already provided by the user; it does not scan or contact devices."
                 ),
             ),
         ]
@@ -142,25 +140,27 @@ class AgentOrchestrator:
             return f"System status is unavailable: {exc}"
 
     @staticmethod
-    def _get_local_device_inventory() -> str:
-        """Read the fixed localhost inventory endpoint; never probe other hosts."""
+    def get_local_device_inventory() -> str:
+        """Fetch JSON from the fixed local inventory endpoint, without scanning."""
         endpoint = "http://127.0.0.1:8765/devices"
         headers = {"Accept": "application/json"}
         token = os.environ.get("MARK_LVI_INVENTORY_TOKEN", "").strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        request = Request(endpoint, headers=headers, method="GET")
+
         try:
+            request = Request(endpoint, headers=headers, method="GET")
             with urlopen(request, timeout=3) as response:
                 raw = response.read(128 * 1024 + 1)
             if len(raw) > 128 * 1024:
                 return "The local inventory response exceeds the 128 KiB limit."
+
             payload = json.loads(raw.decode("utf-8"))
             devices = payload.get("devices") if isinstance(payload, dict) else None
             if not isinstance(devices, list):
                 return "The local inventory API returned an invalid JSON schema."
-            # Keep only expected display fields and bound output before it reaches
-            # the model. Inventory values are data, never instructions.
+
+            # Bound and normalize the content passed back into the model.
             clean = []
             for item in devices[:100]:
                 if not isinstance(item, dict):

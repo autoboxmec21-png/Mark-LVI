@@ -1,11 +1,11 @@
 """Optional LangChain + Chroma conversational orchestrator for JARVIS.
 
 Install its optional dependencies with:
-    pip install langchain-core langchain-chroma chromadb
+    python -m pip install -r requirements-agent.txt
 
 The plugin uses Mark's configured model through core.gemini and stores history
-locally under memory/agent_chroma. Its tools are read-only and allowlisted. It
-can read the manually maintained local inventory API but never scans devices.
+locally under memory/agent_chroma. Its read-only tools include the manually
+maintained localhost inventory API; it does not scan network devices.
 """
 from pathlib import Path
 import threading
