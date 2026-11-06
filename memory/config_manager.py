@@ -1,5 +1,9 @@
 import json
+import os
 import sys
+import tempfile
+import threading
+from functools import wraps
 from pathlib import Path
 
 def get_base_dir() -> Path:
@@ -10,6 +14,40 @@ def get_base_dir() -> Path:
 BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
+_CONFIG_LOCK = threading.RLock()
+
+
+def _serialized_config_write(fn):
+    """Serialize complete read/modify/write operations across application threads."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _CONFIG_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def _write_config(data: dict, *, indent: int = 4) -> None:
+    """Atomically replace the config so readers never observe partial JSON."""
+    ensure_config_dir()
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=CONFIG_DIR,
+            prefix=".api_keys.", suffix=".tmp", delete=False,
+        ) as handle:
+            json.dump(data, handle, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, CONFIG_FILE)
+        if os.name != "nt":
+            try:
+                CONFIG_FILE.chmod(0o600)
+            except OSError:
+                pass
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -17,6 +55,7 @@ def ensure_config_dir() -> None:
 def config_exists() -> bool:
     return CONFIG_FILE.exists()
 
+@_serialized_config_write
 def save_api_keys(gemini_api_key: str) -> None:
     ensure_config_dir()
 
@@ -29,19 +68,18 @@ def save_api_keys(gemini_api_key: str) -> None:
 
     data["gemini_api_key"] = gemini_api_key.strip()
 
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
+    _write_config(data, indent=2)
 
 def load_api_keys() -> dict:
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"❌ Failed to load api_keys.json: {e}")
-        return {}
+    with _CONFIG_LOCK:
+        if not CONFIG_FILE.exists():
+            return {}
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            print(f"❌ Failed to load api_keys.json: {e}")
+            return {}
 
 def get_gemini_key() -> str | None:
     return load_api_keys().get("gemini_api_key")
@@ -61,6 +99,7 @@ def get_user_name() -> str:
     return load_api_keys().get("user_name", "")
 
 
+@_serialized_config_write
 def save_assistant_config(assistant_name: str, user_name: str) -> None:
     """Persist assistant name and user name to config."""
     ensure_config_dir()
@@ -72,7 +111,7 @@ def save_assistant_config(assistant_name: str, user_name: str) -> None:
             data = {}
     data["assistant_name"] = assistant_name.strip() or "JARVIS"
     data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -89,6 +128,7 @@ def get_voice() -> str:
     return v if v in AVAILABLE_VOICES else DEFAULT_VOICE
 
 
+@_serialized_config_write
 def save_voice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""
@@ -101,7 +141,7 @@ def save_voice(voice_name: str) -> None:
             data = {}
     v = (voice_name or "").strip()
     data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 def get_wake_word_enabled() -> bool:
@@ -109,6 +149,7 @@ def get_wake_word_enabled() -> bool:
     return load_api_keys().get("wake_word_enabled", False)
 
 
+@_serialized_config_write
 def save_wake_word_enabled(enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}
@@ -118,7 +159,7 @@ def save_wake_word_enabled(enabled: bool) -> None:
         except Exception:
             data = {}
     data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -126,6 +167,7 @@ def get_push_to_talk_enabled() -> bool:
     return load_api_keys().get("push_to_talk_enabled", False)
 
 
+@_serialized_config_write
 def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
@@ -145,6 +187,7 @@ def get_hud_style() -> str:
     return v if v in HUD_STYLES else "face"
 
 
+@_serialized_config_write
 def save_hud_style(style: str) -> None:
     s = str(style or "").strip().lower()
     _save_flag("hud_style", s if s in HUD_STYLES else "face")
@@ -163,6 +206,7 @@ def get_ui_scale() -> float:
     return min(v, 3.0) if v >= 0.5 else 0.0
 
 
+@_serialized_config_write
 def save_ui_scale(scale: float) -> None:
     _save_flag("ui_scale", float(scale or 0))
 
@@ -182,6 +226,7 @@ def get_thinking_enabled() -> bool:
     return bool(load_api_keys().get("thinking_enabled", False))
 
 
+@_serialized_config_write
 def save_thinking_enabled(enabled: bool) -> None:
     _save_flag("thinking_enabled", enabled)
 
@@ -220,6 +265,7 @@ def get_turn_tuning() -> dict:
     }
 
 
+@_serialized_config_write
 def save_turn_tuning(values: dict) -> None:
     ensure_config_dir()
     data: dict = {}
@@ -232,7 +278,7 @@ def save_turn_tuning(values: dict) -> None:
     cur = dict(cur) if isinstance(cur, dict) else {}
     cur.update(values or {})
     data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 def get_proactive_audio_enabled() -> bool:
@@ -248,6 +294,7 @@ def get_proactive_audio_enabled() -> bool:
     return bool(load_api_keys().get("proactive_audio", True))
 
 
+@_serialized_config_write
 def save_proactive_audio_enabled(enabled: bool) -> None:
     _save_flag("proactive_audio", enabled)
 
@@ -264,11 +311,13 @@ def get_media_resolution() -> str:
     return v if v in MEDIA_RESOLUTIONS else "medium"
 
 
+@_serialized_config_write
 def save_media_resolution(value: str) -> None:
     v = str(value or "").strip().lower()
     _save_flag("media_resolution", v if v in MEDIA_RESOLUTIONS else "medium")
 
 
+@_serialized_config_write
 def _save_flag(key: str, value) -> None:
     """Read-modify-write one key without disturbing the rest of the config."""
     ensure_config_dir()
@@ -279,13 +328,14 @@ def _save_flag(key: str, value) -> None:
         except Exception:
             data = {}
     data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 def get_brief_enabled() -> bool:
     return load_api_keys().get("morning_brief_enabled", True)
 
 
+@_serialized_config_write
 def save_brief_enabled(enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}
@@ -295,7 +345,7 @@ def save_brief_enabled(enabled: bool) -> None:
         except Exception:
             data = {}
     data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -305,6 +355,7 @@ def save_brief_enabled(enabled: bool) -> None:
 # both the factory setting and what an unresolvable saved device falls back to —
 # so unplugging a headset degrades to the built-in speakers instead of crashing.
 
+@_serialized_config_write
 def _patch_config(**fields) -> None:
     """Read-modify-write one or more keys in api_keys.json.
 
@@ -319,7 +370,7 @@ def _patch_config(**fields) -> None:
         except Exception:
             data = {}
     data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
 def get_input_device() -> str:
@@ -327,6 +378,7 @@ def get_input_device() -> str:
     return (load_api_keys().get("input_device", "") or "").strip()
 
 
+@_serialized_config_write
 def save_input_device(name: str) -> None:
     _patch_config(input_device=(name or "").strip())
 
@@ -336,6 +388,7 @@ def get_output_device() -> str:
     return (load_api_keys().get("output_device", "") or "").strip()
 
 
+@_serialized_config_write
 def save_output_device(name: str) -> None:
     _patch_config(output_device=(name or "").strip())
 
@@ -363,6 +416,7 @@ def get_plugin_setting(namespace: str, key: str, default=None):
     return get_plugin_config(namespace).get(key, default)
 
 
+@_serialized_config_write
 def save_plugin_config(namespace: str, values: dict) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
@@ -382,9 +436,10 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     cur.update(values)
     pc[namespace] = cur
     data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 
+@_serialized_config_write
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
     ensure_config_dir()
     data: dict = {}
@@ -398,7 +453,7 @@ def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
         plugins_cfg = {}
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
 
 # ── Providers: local STT/LLM/TTS and non-Gemini APIs ─────────────────────────
 # Stored here rather than in a file of their own, for the same reason plugin
@@ -498,12 +553,14 @@ def get_sidecar_provider() -> str:
     return str(get_providers().get("sidecar", "") or "").strip()
 
 
+@_serialized_config_write
 def _patch_providers(**fields) -> None:
     p = get_providers()
     p.update(fields)
     _patch_config(providers=p)
 
 
+@_serialized_config_write
 def save_provider_mode(mode: str) -> None:
     mode = (mode or "").strip().lower()
     _patch_providers(mode=mode if mode in (PROVIDER_MODE_GEMINI,
@@ -511,6 +568,7 @@ def save_provider_mode(mode: str) -> None:
                      else PROVIDER_MODE_GEMINI)
 
 
+@_serialized_config_write
 def save_provider_config(provider_id: str, values: dict) -> None:
     """Merge settings for one provider. Only the given keys are touched, so the
     panel can save one field without reading and rewriting the rest."""
@@ -526,6 +584,7 @@ def save_provider_config(provider_id: str, values: dict) -> None:
     _patch_config(providers=p)
 
 
+@_serialized_config_write
 def save_pipeline(stt: str = None, llm: str = None, tts: str = None) -> None:
     """Set one or more pipeline slots. `None` leaves a slot alone; '' clears it."""
     p = get_providers()
@@ -538,6 +597,7 @@ def save_pipeline(stt: str = None, llm: str = None, tts: str = None) -> None:
     _patch_config(providers=p)
 
 
+@_serialized_config_write
 def save_sidecar_provider(provider_id: str) -> None:
     _patch_providers(sidecar=(provider_id or "").strip())
 
@@ -552,6 +612,7 @@ def get_coding_provider() -> str:
     return str(get_providers().get("coding", "") or "").strip()
 
 
+@_serialized_config_write
 def save_coding_provider(provider_id: str) -> None:
     _patch_providers(coding=(provider_id or "").strip())
 
@@ -568,10 +629,12 @@ def get_sidecar_first() -> bool:
     return bool(get_providers().get("sidecar_first", False))
 
 
+@_serialized_config_write
 def save_sidecar_first(enabled: bool) -> None:
     _patch_providers(sidecar_first=bool(enabled))
 
 
+@_serialized_config_write
 def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
                    sidecar: str = None, sidecar_first: bool = None,
                    coding: str = None) -> None:
@@ -626,4 +689,4 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
         block["coding"] = str(coding or "").strip()
 
     data["providers"] = block
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    _write_config(data, indent=4)
