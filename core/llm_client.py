@@ -37,6 +37,7 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR    = get_base_dir()
+_OLLAMA_LOG_HANDLE = None  # Keep the child log file open for the lifetime of Ollama.
 CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 _DEFAULTS = {
@@ -100,10 +101,20 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
 
     print("[LLM] Ollama not running — launching 'ollama serve'…")
     try:
-        kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        # Keep startup/runtime diagnostics instead of discarding the child's
+        # output. The module-level handle stays open while the child is alive.
+        log_path = BASE_DIR / "logs" / "ollama.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        global _OLLAMA_LOG_HANDLE
+        _OLLAMA_LOG_HANDLE = log_path.open("a", encoding="utf-8")
+        kwargs: dict = {
+            "stdout": _OLLAMA_LOG_HANDLE,
+            "stderr": subprocess.STDOUT,
+        }
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         subprocess.Popen(["ollama", "serve"], **kwargs)
+        print(f"[LLM] Ollama output is being logged to {log_path}")
     except FileNotFoundError:
         print("[LLM] 'ollama' command not found. Install Ollama from https://ollama.com")
         return False
