@@ -43,6 +43,7 @@ import sys
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import sounddevice as sd
@@ -171,6 +172,21 @@ _STALL_LIMIT = 30.0
 _VIS_WIN = 1024        # ~43 ms analysis window at 24 kHz: enough for formants
 _VIS_HOP = 480         # 20 ms between frames, i.e. 50 shapes a second
 
+
+@lru_cache(maxsize=8)
+def _viseme_spectral_config(sr: int):
+    """Reusable FFT window and formant masks for a sample rate."""
+    win = np.hanning(_VIS_WIN).astype(np.float32)
+    freqs = np.fft.rfftfreq(_VIS_WIN, 1.0 / sr)
+    return (
+        win,
+        (freqs >= 150) & (freqs < 450),
+        (freqs >= 450) & (freqs < 1100),
+        (freqs >= 600) & (freqs < 1300),
+        (freqs >= 1700) & (freqs < 3200),
+        (freqs >= 3800) & (freqs < 8000),
+    )
+
 # Delay from handing the first bytes of a reply to an already-running output
 # stream to hearing them: one callback period, plus whatever the DAC adds.
 _FIRST_SOUND = CHUNK_SIZE / RECEIVE_SAMPLE_RATE      # ~43 ms
@@ -195,13 +211,11 @@ def _pcm_visemes(samples, sr: int = 24000):
         x = np.asarray(samples, dtype=np.float32)
         if x.size < _VIS_WIN:
             return []
-        win = np.hanning(_VIS_WIN).astype(np.float32)
-        freqs = np.fft.rfftfreq(_VIS_WIN, 1.0 / sr)
-        b_f1_lo = (freqs >= 150) & (freqs < 450)     # F1 of close vowels
-        b_f1_hi = (freqs >= 450) & (freqs < 1100)    # F1 of open vowels
-        b_f2_bk = (freqs >= 600) & (freqs < 1300)    # F2 of rounded vowels
-        b_f2_fr = (freqs >= 1700) & (freqs < 3200)   # F2 of spread vowels
-        b_hiss = (freqs >= 3800) & (freqs < 8000)    # fricatives
+        # These values are identical for every block at a given sample rate.
+        # Cache them instead of allocating a Hann window and five masks per call.
+        win, b_f1_lo, b_f1_hi, b_f2_bk, b_f2_fr, b_hiss = (
+            _viseme_spectral_config(int(sr))
+        )
 
         # One frame per hop across the *whole* block. Stepping only while a full
         # window fits stopped 1024 - 480 samples short of the end, so a 200 ms

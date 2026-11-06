@@ -85,36 +85,37 @@ def _read_full_config() -> dict:
 APP_VERSION  = "MARK LVI"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
-_DEFAULT_W, _DEFAULT_H = 980, 700
-_MIN_W,     _MIN_H     = 820, 580
-_LEFT_W  = 148
-_RIGHT_W = 340
+_DEFAULT_W, _DEFAULT_H = 1440, 900
+_MIN_W,     _MIN_H     = 1100, 700
+_LEFT_W  = 132
+_RIGHT_W = 292
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
 class C:
-    BG        = "#00060a"
-    PANEL     = "#010d14"
-    PANEL2    = "#010f18"
-    BORDER    = "#0d3347"
-    BORDER_B  = "#1a5c7a"
-    BORDER_A  = "#0f4060"
-    PRI       = "#00d4ff"
-    PRI_DIM   = "#007a99"
-    PRI_GHO   = "#001f2e"
-    ACC       = "#ff6b00"
-    ACC2      = "#ffcc00"
-    GREEN     = "#00ff88"
-    GREEN_D   = "#00aa55"
-    RED       = "#ff3355"
-    MUTED_C   = "#ff3366"
-    TEXT      = "#8ffcff"
-    TEXT_DIM  = "#3a8a9a"
-    TEXT_MED  = "#5ab8cc"
-    WHITE     = "#d8f8ff"
-    DARK      = "#000d14"
-    BAR_BG    = "#011520"
+    # Cyberpunk palette: ultraviolet surfaces, electric cyan and magenta accents.
+    BG        = "#080511"
+    PANEL     = "#100a1c"
+    PANEL2    = "#160d25"
+    BORDER    = "#39204f"
+    BORDER_B  = "#7134a0"
+    BORDER_A  = "#51266f"
+    PRI       = "#c14bff"
+    PRI_DIM   = "#7830a6"
+    PRI_GHO   = "#241033"
+    ACC       = "#00e5ff"
+    ACC2      = "#ff3bd4"
+    GREEN     = "#42ffc4"
+    GREEN_D   = "#18b98a"
+    RED       = "#ff456e"
+    MUTED_C   = "#ff4d91"
+    TEXT      = "#f0d9ff"
+    TEXT_DIM  = "#9875ad"
+    TEXT_MED  = "#c19bd8"
+    WHITE     = "#fff4ff"
+    DARK      = "#0b0714"
+    BAR_BG    = "#1a1028"
 
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
@@ -862,11 +863,11 @@ class HudCanvas(QWidget):
         # Sized to the band between the top of the canvas and the status line,
         # capped by width, so it fills the HUD at any window size — including
         # fullscreen — without ever colliding with the status text below.
-        _sy_status = cy + fw * 0.40
+        _sy_status = cy + fw * 0.445
         if self._avatar is not None and self.hud_style == "face":
-            _band_t = 12.0
+            _band_t = 8.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
+            _r_head = min(fw * 0.405, _band_h / (self._avatar.SPAN + 0.08))
             _head_cy = _band_t + (_band_h - self._avatar.SPAN * _r_head) / 2.0 + _r_head
 
             if self.muted:
@@ -4430,14 +4431,15 @@ class MainWindow(QMainWindow):
             apply_ui_accent(_ui_color)
 
         self.setWindowTitle(f"{_display} — {APP_VERSION}")
-        self.setMinimumSize(_MIN_W, _MIN_H)
-        self.resize(_DEFAULT_W, _DEFAULT_H)
-
         screen = QApplication.primaryScreen().availableGeometry()
-        self.move(
-            (screen.width()  - _DEFAULT_W) // 2,
-            (screen.height() - _DEFAULT_H) // 2,
-        )
+        # Immersive workspace: use most of the available desktop without
+        # forcing fullscreen, so every existing panel and control stays reachable.
+        target_w = max(820, min(_DEFAULT_W, screen.width() - 48))
+        target_h = max(580, min(_DEFAULT_H, screen.height() - 72))
+        self.setMinimumSize(min(_MIN_W, target_w), min(_MIN_H, target_h))
+        self.resize(target_w, target_h)
+        self.move((screen.width() - target_w) // 2,
+                  (screen.height() - target_h) // 2)
 
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
@@ -5477,7 +5479,7 @@ class MainWindow(QMainWindow):
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_LEFT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER};")
+        w.setStyleSheet(f"background: {C.DARK}; border-right: 1px solid {C.BORDER_B};")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(8, 10, 8, 10)
         lay.setSpacing(6)
@@ -5548,7 +5550,7 @@ class MainWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
         w.setFixedWidth(_RIGHT_W)
-        w.setStyleSheet(f"background: {C.DARK}; border-left: 1px solid {C.BORDER};")
+        w.setStyleSheet(f"background: {C.DARK}; border-left: 1px solid {C.BORDER_B};")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
