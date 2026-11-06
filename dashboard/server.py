@@ -769,7 +769,7 @@ class DashboardServer:
             pass
         except Exception:
             return False
-        return _ensure_certs()
+        return True
 
     def get_url(self) -> str:
         """The full URL the QR code carries — always with its scheme, so a
