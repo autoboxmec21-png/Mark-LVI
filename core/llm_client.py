@@ -21,10 +21,29 @@ import re
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Callable, Generator
 
 import requests
+
+# requests.Session keeps TCP connections alive between calls. A session is
+# thread-local because requests does not promise that one Session can be safely
+# mutated/used concurrently by arbitrary worker threads.
+_HTTP_LOCAL = threading.local()
+
+
+def _http() -> requests.Session:
+    session = getattr(_HTTP_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=4, pool_maxsize=4, max_retries=0
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _HTTP_LOCAL.session = session
+    return session
 
 # Matches a sentence boundary: [.!?] followed by whitespace, or a blank line.
 # Avoids splitting on decimals (3.5) because those have no space after the dot.
@@ -37,6 +56,7 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR    = get_base_dir()
+_OLLAMA_LOG_HANDLE = None  # Keep the child log file open for Ollama's lifetime.
 CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 _DEFAULTS = {
@@ -73,7 +93,7 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
         # by the user — we just check if they're reachable.
         health = f"{url}/v1/models"
         try:
-            ok = requests.get(health, timeout=5).status_code == 200
+            ok = _http().get(health, timeout=5).status_code == 200
             if ok:
                 print(f"[LLM] OpenAI-compatible server reachable at {url}")
             else:
@@ -91,7 +111,7 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
 
     def _is_up() -> bool:
         try:
-            return requests.get(health, timeout=3).status_code == 200
+            return _http().get(health, timeout=3).status_code == 200
         except Exception:
             return False
 
@@ -100,10 +120,18 @@ def ensure_ollama_running(timeout: int = 15) -> bool:
 
     print("[LLM] Ollama not running — launching 'ollama serve'…")
     try:
-        kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        log_path = BASE_DIR / "logs" / "ollama.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        global _OLLAMA_LOG_HANDLE
+        _OLLAMA_LOG_HANDLE = log_path.open("a", encoding="utf-8")
+        kwargs: dict = {
+            "stdout": _OLLAMA_LOG_HANDLE,
+            "stderr": subprocess.STDOUT,
+        }
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         subprocess.Popen(["ollama", "serve"], **kwargs)
+        print(f"[LLM] Ollama output is being logged to {log_path}")
     except FileNotFoundError:
         print("[LLM] 'ollama' command not found. Install Ollama from https://ollama.com")
         return False
@@ -156,7 +184,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
             "max_tokens": 1,
         }
         try:
-            resp = requests.post(f"{url}/v1/chat/completions", json=payload, timeout=180)
+            resp = _http().post(f"{url}/v1/chat/completions", json=payload, timeout=180)
             resp.raise_for_status()
             print(f"[LLM] '{model}' ready (OpenAI-compatible server).")
             return True
@@ -175,7 +203,7 @@ def warmup_model(system_prompt: str | None = None) -> bool:
         "options":    {"num_predict": 1, "num_gpu": 99},
     }
     try:
-        resp = requests.post(f"{url}/api/chat", json=payload, timeout=180)
+        resp = _http().post(f"{url}/api/chat", json=payload, timeout=180)
         resp.raise_for_status()
         print(f"[LLM] '{model}' loaded and KV cache primed.")
         return True
@@ -195,7 +223,7 @@ def check_model_available(log: Callable | None = None) -> bool:
 
     url, model = get_llm_settings()
     try:
-        resp = requests.get(f"{url}/api/tags", timeout=5)
+        resp = _http().get(f"{url}/api/tags", timeout=5)
         resp.raise_for_status()
         pulled = [m.get("name", "") for m in resp.json().get("models", [])]
         model_base = model.split(":")[0]
@@ -252,7 +280,7 @@ def call_llm(
             payload["tools"]       = tools
             payload["tool_choice"] = "auto"
         try:
-            resp = requests.post(endpoint, json=payload, timeout=timeout)
+            resp = _http().post(endpoint, json=payload, timeout=timeout)
             resp.raise_for_status()
             choice = resp.json().get("choices", [{}])[0]
             msg    = choice.get("message", {})
@@ -292,7 +320,7 @@ def call_llm(
         payload["tools"] = tools
 
     try:
-        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp = _http().post(endpoint, json=payload, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         msg  = data.get("message", {})
@@ -304,7 +332,7 @@ def call_llm(
         print(f"[LLM] ConnectionError — trying to restart Ollama… ({e})")
         if ensure_ollama_running():
             try:
-                resp = requests.post(endpoint, json=payload, timeout=timeout)
+                resp = _http().post(endpoint, json=payload, timeout=timeout)
                 resp.raise_for_status()
                 data = resp.json()
                 msg  = data.get("message", {})
@@ -350,13 +378,13 @@ def call_llm_text(
     payload = {"model": m, "messages": messages, "stream": False, "keep_alive": -1, "options": {"num_predict": 600}}
 
     try:
-        resp = requests.post(endpoint, json=payload, timeout=timeout)
+        resp = _http().post(endpoint, json=payload, timeout=timeout)
         resp.raise_for_status()
         return (resp.json().get("message", {}).get("content") or "").strip()
     except requests.exceptions.ConnectionError:
         if ensure_ollama_running():
             try:
-                resp = requests.post(endpoint, json=payload, timeout=timeout)
+                resp = _http().post(endpoint, json=payload, timeout=timeout)
                 resp.raise_for_status()
                 return (resp.json().get("message", {}).get("content") or "").strip()
             except Exception:
@@ -394,7 +422,7 @@ def _stream_openai(
         payload["tool_choice"] = "auto"
 
     try:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with _http().post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
             resp.raise_for_status()
             full_content = ""
             buf          = ""
@@ -521,7 +549,7 @@ def call_llm_stream(
         payload["tools"] = tools
 
     def _do_stream() -> Generator[dict, None, None]:
-        with requests.post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
+        with _http().post(endpoint, json=payload, timeout=timeout, stream=True) as resp:
             resp.raise_for_status()
             full_content = ""
             tool_calls:  list = []

@@ -30,7 +30,8 @@ import random
 
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
+from PyQt6.QtGui import (QBrush, QColor, QPainter, QPainterPath, QPen,
+                         QPolygonF, QRadialGradient)
 
 from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
@@ -120,9 +121,9 @@ class HoloAvatar:
         av.paint(painter, cx, cy, r, primary, accent, bg)  # once per frame
     """
 
-    # Look: True paints a lit, solid head with a wireframe over it; False is a
-    # see-through glass wireframe. Flip here, or per instance.
-    shaded = True
+    # Cyber hologram presentation: transparent mesh with animated scan and
+    # luminous facial landmarks. Set True to restore the solid shaded treatment.
+    shaded = False
 
     def __init__(self) -> None:
         mesh = get_head_mesh()
@@ -487,6 +488,12 @@ class HoloAvatar:
         if bg is None:
             bg = QColor(0, 0, 0)
         amp = self._glow
+        # The new reference uses a living particle field rather than a human
+        # face. Keep the same HoloAvatar lifecycle so audio level, speaking,
+        # listening and state changes continue to drive the visual response.
+        self._paint_particle_orb(p, cx, cy, r, primary, accent, bg, amp)
+        return
+
         verts, norms = self._pose()
 
         # ── aura ────────────────────────────────────────────────────────────
@@ -510,6 +517,94 @@ class HoloAvatar:
             self._paint_surface(p, xs, ys, norms, verts, primary, bg, amp)
         self._paint_wire(p, xs, ys, norms, verts, primary, bg, amp)
         self._paint_features(p, xs, ys, norms, r, primary, accent, bg, amp)
+
+    def _paint_particle_orb(self, p: QPainter, cx: float, cy: float, r: float,
+                            primary: QColor, accent: QColor, bg: QColor,
+                            amp: float) -> None:
+        """Render the reference's fluid blue/violet particle intelligence orb.
+
+        The points are generated deterministically from a spherical parameter
+        grid, then gently displaced by travelling waves. This avoids image
+        assets and GPU dependencies while keeping the animation inexpensive
+        and responsive to the existing audio envelope.
+        """
+        t = self._t
+        pulse = 1.0 + 0.045 * math.sin(t * 1.7) + 0.10 * amp
+        radius = r * 0.83 * pulse
+
+        # Soft coloured bloom behind the point cloud.
+        glow_r = radius * 1.48
+        glow = QRadialGradient(cx, cy, glow_r)
+        glow.setColorAt(0.00, _c(primary, 24 + 34 * amp))
+        glow.setColorAt(0.42, _c(accent, 13 + 24 * amp))
+        glow.setColorAt(1.00, _c(bg, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(QRectF(cx - glow_r, cy - glow_r, glow_r * 2, glow_r * 2))
+
+        # A dense latitude/longitude lattice creates the dotted volume. The
+        # travelling waves deform the silhouette like the supplied reference.
+        rows, cols = 31, 64
+        buckets: list[list[QPointF]] = [[], [], []]
+        sizes = (1.00, 1.30, 1.65)
+        for iy in range(1, rows):
+            lat = -math.pi / 2 + math.pi * iy / rows
+            clat, slat = math.cos(lat), math.sin(lat)
+            for ix in range(cols):
+                lon = 2.0 * math.pi * ix / cols
+                wave_a = math.sin(lon * 2.0 + t * 0.72 + lat * 2.4)
+                wave_b = math.cos(lon * 3.0 - t * 0.48 + lat * 1.7)
+                wave_c = math.sin(lat * 4.0 + t * 0.55)
+                deform = 1.0 + 0.105 * wave_a + 0.050 * wave_b + 0.035 * wave_c
+                # A small asymmetric fold gives the cloud its fluid, non-perfect
+                # sphere silhouette without allowing the particles to collapse.
+                fold = 1.0 + 0.055 * math.sin(lon + t * 0.35) * (0.35 + 0.65 * abs(slat))
+                rr = radius * deform * fold
+                x = clat * math.cos(lon)
+                z = clat * math.sin(lon)
+                # Slow orbital drift and a mild perspective cue.
+                rot = t * 0.12
+                xr = x * math.cos(rot) - z * math.sin(rot)
+                zr = x * math.sin(rot) + z * math.cos(rot)
+                perspective = 1.0 + 0.10 * zr
+                px = cx + xr * rr * perspective
+                py = cy - slat * rr * (0.92 + 0.035 * wave_b) * perspective
+
+                # Purple gathers around the lower rim; cyan/blue dominates the
+                # crown and front, matching the supplied blue-to-violet palette.
+                band = (slat + 1.0) * 0.5
+                edge = abs(zr)
+                if band < 0.28 or (edge > 0.82 and band < 0.58):
+                    bucket = 2
+                elif band < 0.43 or edge > 0.90:
+                    bucket = 1
+                else:
+                    bucket = 0
+                # Back-side points are dimmer, but remain visible as depth.
+                if zr < -0.30:
+                    bucket = max(bucket, 1)
+                buckets[bucket].append(QPointF(px, py))
+
+        palette = [
+            _blend(bg, primary, 205 + 42 * amp),
+            _blend(bg, QColor(72, 142, 255), 190 + 50 * amp),
+            _blend(bg, QColor(190, 86, 255), 178 + 60 * amp),
+        ]
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for i, points in enumerate(buckets):
+            if not points:
+                continue
+            p.setPen(QPen(palette[i], sizes[i], Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            p.drawPoints(points)
+
+        # A few faint orbital arcs add depth without turning the orb into a UI ring.
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(_c(primary, 28 + 24 * amp), max(0.7, r * 0.002)))
+        arc = QRectF(cx - radius * 1.02, cy - radius * 0.48,
+                     radius * 2.04, radius * 0.96)
+        p.drawArc(arc, int((t * 18) % 360 * 16), 150 * 16)
 
     def _paint_surface(self, p: QPainter, xs, ys, norms, verts,
                        primary: QColor, bg: QColor, amp: float) -> None:
@@ -560,19 +655,40 @@ class HoloAvatar:
         # interleaves them into a torn seam.
         fz = (verts[a, 2][vis] + verts[b, 2][vis] + verts[c, 2][vis]) * (1.0 / 3.0)
         order = np.argsort(self._fgroup[vis] * 1000.0 + fz, kind="stable")
-        tris = np.stack([ax, ay, bx, by, cxx, cyy], axis=1)[order].tolist()
-        shade = idx[order].tolist()
+        # Batch facets by mesh layer and shade. The mesh is front-facing here,
+        # so projected facets tile the visible surface; grouping their fills
+        # removes hundreds of individual QPainter calls per frame. Preserve the
+        # neck-before-head layering, and keep depth order inside each colour path.
+        face_groups = self._fgroup[vis]
+        fz = (verts[a, 2][vis] + verts[b, 2][vis] + verts[c, 2][vis]) * (1.0 / 3.0)
         lut = self._lut(bg, primary)
 
-        # Aliased fills: adjacent antialiased polygons leave hairline seams, and
-        # the interior of a tiled surface has no silhouette worth smoothing —
-        # the antialiased wireframe drawn afterwards covers the outline.
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         p.setPen(Qt.PenStyle.NoPen)
-        for q, sh in zip(tris, shade):
-            p.setBrush(lut[sh])
-            p.drawPolygon(QPolygonF([QPointF(q[0], q[1]), QPointF(q[2], q[3]),
-                                     QPointF(q[4], q[5])]))
+        for group in np.unique(face_groups):
+            group_idx = np.flatnonzero(face_groups == group)
+            group_shades = idx[group_idx]
+            # Paint colour groups from their average far depth to near depth.
+            # Faces sharing a colour are internally sorted far-to-near.
+            shade_depth = []
+            for sh in np.unique(group_shades):
+                same = group_idx[group_shades == sh]
+                shade_depth.append((float(fz[group_idx[group_shades == sh]].mean()),
+                                    int(sh), same))
+            shade_depth.sort(key=lambda item: item[0])
+            for _depth, sh, face_indices in shade_depth:
+                face_indices = face_indices[np.argsort(fz[face_indices], kind="stable")]
+                path = QPainterPath()
+                path.setFillRule(Qt.FillRule.WindingFill)
+                for face_i in face_indices:
+                    ia, ib, ic = int(a[face_i]), int(b[face_i]), int(c[face_i])
+                    path.addPolygon(QPolygonF([
+                        QPointF(float(xs[ia]), float(ys[ia])),
+                        QPointF(float(xs[ib]), float(ys[ib])),
+                        QPointF(float(xs[ic]), float(ys[ic])),
+                    ]))
+                p.setBrush(lut[sh])
+                p.drawPath(path)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
     def _paint_wire(self, p: QPainter, xs, ys, norms, verts,

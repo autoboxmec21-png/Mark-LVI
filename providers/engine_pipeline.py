@@ -154,6 +154,9 @@ class PipelineEngine:
         self._done_calls: dict[str, str] = {}
         self._pending_sigs: dict[str, str] = {}
         self._rounds = 0
+        # Once the per-turn budget is exhausted, providers receive no tools and
+        # any tool call they emit anyway is ignored.
+        self._force_no_tools = False
         # Something arrived while a generation was running and still needs an
         # answer once that one is finished.
         self._followup = False
@@ -337,6 +340,7 @@ class PipelineEngine:
         self._history.append({"role": "user", "content": content})
         self._done_calls.clear()
         self._rounds = 0
+        self._force_no_tools = False
         self._queue_generation()
 
     async def send_tool_response(self, *, function_responses) -> None:
@@ -447,7 +451,18 @@ class PipelineEngine:
         thinking = _ReasoningFilter()
         pending = ""            # visible text not yet a whole sentence
         try:
-            async for ev in self._llm.chat(self._messages(), self._tools):
+            messages = self._messages()
+            if self._force_no_tools:
+                instruction = ("Tool execution is disabled for the rest of this turn. "
+                               "Do not emit tool calls or tool-call JSON. Give the best "
+                               "final answer using the results already present.")
+                if messages and messages[0].get("role") == "system":
+                    messages[0] = dict(messages[0],
+                                       content=messages[0]["content"] + "\\n\\n" + instruction)
+                else:
+                    messages.insert(0, {"role": "system", "content": instruction})
+            async for ev in self._llm.chat(
+                    messages, None if self._force_no_tools else self._tools):
                 if ev.get("text"):
                     visible = thinking.feed(ev["text"])
                     if visible and first_word is None:
@@ -483,10 +498,18 @@ class PipelineEngine:
             text = "".join(said)
 
             # A prompt-mode model answers with JSON instead of a tool-call field.
-            if not calls and self.caps.get("tool_format") == "prompt":
+            if (not calls and not self._force_no_tools
+                    and self.caps.get("tool_format") == "prompt"):
                 parsed = _parse_prompt_call(text, set(self.tool_names()))
                 if parsed:
                     calls, text = [parsed], ""
+
+            if self._force_no_tools and calls:
+                self._log("SYS: ignoring tool requests after the per-turn tool limit.")
+                calls = []
+                if not text.strip():
+                    text = ("I couldn't complete the remaining steps within the "
+                            "tool-call limit. Please try a narrower request.")
 
             if calls:
                 self._rounds += 1
@@ -526,6 +549,7 @@ class PipelineEngine:
                         "content": ("Do not call any more tools. Answer now, "
                                     "briefly, using what the tools already "
                                     "returned.")})
+                    self._force_no_tools = True
                     fresh = []
 
                 if not fresh:
