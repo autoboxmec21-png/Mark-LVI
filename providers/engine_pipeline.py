@@ -502,6 +502,15 @@ class PipelineEngine:
                 if parsed:
                     calls, text = [parsed], ""
 
+            if self._force_no_tools and calls:
+                # A provider may ignore the empty tool list or hallucinate a
+                # prompt-mode call. Never re-enter the tool loop after the cap.
+                self._log("SYS: ignoring tool requests after the per-turn tool limit.")
+                calls = []
+                if not text.strip():
+                    text = ("I couldn't complete the remaining steps within the "
+                            "tool-call limit. Please try a narrower request.")
+
             if calls:
                 self._rounds += 1
 
